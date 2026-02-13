@@ -55,7 +55,7 @@ class device():
 
 #%% Initialization
 
-#%%% Default Parameters:
+    #%%% Default Parameters:
     default_pars = {"LO": {
                         "rr": 6.0e9, 
                         "A": 3.6e9,
@@ -125,4 +125,78 @@ class device():
                     }
 
 
-# %%
+    #%%% __init__ function
+    def __init__(self, qb):
+        self.name = qb
+        self.host=  host
+        self.port = port
+
+        saveDir = f"D:\OPX\qubit_reset_measurements\\{qb}\\{sdate}"
+        self.saveDir = saveDir
+
+        try:
+            print("Loading Parameters from JSON File")
+            with open(f'{self.saveDir}\{qb}_parameters.json', 'r') as f:
+                self.pars  = json.load(f)
+                
+                ## Check pars
+                default_keys = set(self.default_pars.keys())
+                keys = set(self.pars.keys())
+
+                for k in (default_keys - keys):
+                    print(f"Key {k} is missing from the loaded parameters. Adding default value.")
+                    self.pars[k] = self.default_pars[k]
+
+                for k in (keys - default_keys):
+                    self.remove_key(k)
+        except FileNotFoundError:
+            print("No JSON file found. Initializing with default parameters.")
+            self.pars = self.default_pars
+            
+        
+        self.write_pars()
+        self.init_instruments()
+        self.make_config(self.pars)
+
+#%%% Time of Flight Calibration
+
+def tof_cal(self, element):
+    n_avg = 1000
+    reset_time = 40 * clk(self.pars['rr_resettime'])
+
+    with program() as raw_trace_prog:
+        n = declare(int)
+        adc_st = declare_stream(adc_trace = True)
+        update_frequency(element,5e6)
+
+        with for_(n, 0, n < n_avg, n + 1): 
+            reset_phase(element)
+            measure("readout", element, adc_st)
+            wait(reset_time,element)
+
+    with stream_processing():
+        ## Saving the Average
+        adc_st.input1().average.save("adc1")
+        adc_st.input2().average.save("adc2")
+        ## Save the Last Trace
+        adc_st.input1().save("adc1_single_run")
+        adc_st.input2().save("adc2_single_run")
+
+    qmm = QuantumMachinesManager(host = host, port = port)
+    qm = qmm.open_qm(self.config)
+    job = qm.execute(raw_trace_prog)
+    res_handles = job.result_handles
+    res_handles.wait_for_all_values()
+    adc1 = u.raw2volts(res_handles.get("adc1").fetch_all())
+    adc2 = u.raw2volts(res_handles.get("adc2").fetch_all())
+    adc1_single = u.raw2volts(res_handles.get("adc1_single_run").fetch_all())
+    adc2_single = u.raw2volts(res_handles.get("adc2_single_run").fetch_all())
+
+    adc1_mean = np.mean(adc1)
+    adc2_mean = np.mean(adc2)
+
+    adc1_unbiased = adc1_single - adc1_mean
+    adc2_unbiased = adc2_single - adc2_mean
+
+    signal = savgol_filter(np.abs(adc1_unbiased + 1j*adc2_unbiased), 11, 3)
+    th = np.mean(signal[:100]) + 0.5*(np.max(signal)- np.mean(signal[:50]))
